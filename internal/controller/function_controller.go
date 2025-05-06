@@ -49,7 +49,19 @@ type FunctionReconciler struct {
 func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 
-	// TODO(user): your logic here
+	function := &firebasev1alpha1.Function{}
+	if err := r.Get(ctx, req.NamespacedName, function); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Initial state
+	if function.Status.Status == "" {
+		function.Status.Status = firebasev1alpha1.FunctionStatusPending
+		function.Status.Message = "Function created, waiting for deployment"
+		if err := r.Status().Update(ctx, function); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	return ctrl.Result{}, nil
 }

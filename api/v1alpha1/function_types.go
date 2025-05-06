@@ -20,6 +20,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	FunctionStatusPending   = "Pending"   // Initial state when created
+	FunctionStatusDeploying = "Deploying" // Function is being deployed to Firebase
+	FunctionStatusDeployed  = "Deployed"  // Function successfully deployed
+	FunctionStatusFailed    = "Failed"    // Deployment failed
+)
+
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
@@ -69,8 +76,15 @@ type ServiceAccountKeySpec struct {
 
 // FunctionStatus defines the observed state of Function
 type FunctionStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Status represents the current state of the function deployment (Pending, Deploying, Deployed, Failed)
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=Pending;Deploying;Deployed;Failed
+	// +kubebuilder:default=Pending
+	Status string `json:"status"`
+
+	// Message provides details about the current Status
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true
