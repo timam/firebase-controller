@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: function-sample
 spec:
-  Runtime: nodejs18
+  runtime: nodejs18
   source:
     container:
       image: ghcr.io/timam/firebase-function-sample:latest

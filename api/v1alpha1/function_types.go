@@ -25,11 +25,46 @@ import (
 
 // FunctionSpec defines the desired state of Function
 type FunctionSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=nodejs18;nodejs16
+	Runtime string `json:"runtime"`
 
-	// Foo is an example field of Function. Edit function_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// +kubebuilder:validation:Required
+	Source SourceSpec `json:"source"`
+
+	// +kubebuilder:validation:Required
+	Project ProjectSpec `json:"project"`
+}
+
+type SourceSpec struct {
+	// +kubebuilder:validation:Required
+	Container ContainerSpec `json:"container"`
+}
+
+type ContainerSpec struct {
+	// +kubebuilder:validation:Required
+	Image string `json:"image"`
+
+	// +kubebuilder:default=Always
+	ImagePullPolicy string `json:"imagePullPolicy,omitempty"`
+}
+
+type ProjectSpec struct {
+	// +kubebuilder:validation:Required
+	Auth AuthSpec `json:"auth"`
+}
+
+type AuthSpec struct {
+	// +kubebuilder:validation:Required
+	ServiceAccountKey ServiceAccountKeySpec `json:"serviceAccountKey"`
+}
+
+type ServiceAccountKeySpec struct {
+	// +kubebuilder:validation:Required
+	SecretName string `json:"secretName"`
+
+	// +kubebuilder:validation:Required
+	MountPath string `json:"mountPath"`
 }
 
 // FunctionStatus defines the observed state of Function
