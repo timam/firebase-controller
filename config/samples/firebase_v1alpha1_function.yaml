@@ -9,7 +9,7 @@ spec:
   runtime: nodejs18
   source:
     container:
-      image: firebase-test:4
+      image: timam/firebase-test:004
       imagePullPolicy: Always
   project:
     auth:

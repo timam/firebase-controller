@@ -89,6 +89,9 @@ type FunctionStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="NAMESPACE",type="string",JSONPath=".metadata.namespace"
+// +kubebuilder:printcolumn:name="STATUS",type="string",JSONPath=".status.status"
+// +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Function is the Schema for the functions API
 type Function struct {
