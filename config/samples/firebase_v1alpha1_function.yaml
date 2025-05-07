@@ -9,7 +9,7 @@ spec:
   runtime: nodejs18
   source:
     container:
-      image: ghcr.io/timam/firebase-function-sample:latest
+      image: firebase-test:4
       imagePullPolicy: Always
   project:
     auth:

@@ -39,13 +39,69 @@ spec:
           spec:
             description: FunctionSpec defines the desired state of Function
             properties:
-              foo:
-                description: Foo is an example field of Function. Edit function_types.go
-                  to remove/update
+              project:
+                properties:
+                  auth:
+                    properties:
+                      serviceAccountKey:
+                        properties:
+                          mountPath:
+                            type: string
+                          secretName:
+                            type: string
+                        required:
+                        - mountPath
+                        - secretName
+                        type: object
+                    required:
+                    - serviceAccountKey
+                    type: object
+                required:
+                - auth
+                type: object
+              runtime:
+                enum:
+                - nodejs18
+                - nodejs16
                 type: string
+              source:
+                properties:
+                  container:
+                    properties:
+                      image:
+                        type: string
+                      imagePullPolicy:
+                        default: Always
+                        type: string
+                    required:
+                    - image
+                    type: object
+                required:
+                - container
+                type: object
+            required:
+            - project
+            - runtime
+            - source
             type: object
           status:
             description: FunctionStatus defines the observed state of Function
+            properties:
+              message:
+                description: Message provides details about the current Status
+                type: string
+              status:
+                default: Pending
+                description: Status represents the current state of the function deployment
+                  (Pending, Deploying, Deployed, Failed)
+                enum:
+                - Pending
+                - Deploying
+                - Deployed
+                - Failed
+                type: string
+            required:
+            - status
             type: object
         type: object
     served: true
