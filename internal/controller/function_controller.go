@@ -148,27 +148,33 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			function.Status.RetryCount = 0
 			function.Status.LastRetryTime = nil
 
+			// Cleanup the successful deployment pod first
+			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
+				log.Error(err, "Failed to cleanup deployment pod")
+				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed",
+					"Failed to cleanup deployment pod after successful deployment")
+			}
+
+			// Update status and record event
 			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed, "Deploy complete!"); err != nil {
 				log.Error(err, "Failed to update status to deployed")
 				return ctrl.Result{}, err
 			}
-			r.EventRecorder.Event(function, corev1.EventTypeNormal, "Deployed", "Firebase function deployed successfully")
+			r.EventRecorder.Event(function, corev1.EventTypeNormal, "Deployed",
+				"Firebase function deployed successfully")
 
-			// Cleanup the successful deployment pod
-			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
-				log.Error(err, "Failed to cleanup deployment pod")
-				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed", "Failed to cleanup deployment pod")
-			}
+			return ctrl.Result{}, nil
 		} else if failed, failureDetails := r.isDeploymentFailed(ctx, function); failed {
-			pod := &corev1.Pod{}
-			podName := function.Name + "-firebase-deployer"
-			if err := r.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: podName}, pod); err == nil {
-				logs := r.getPodLogs(ctx, pod)
-				r.EventRecorder.Eventf(function, corev1.EventTypeWarning, "DeploymentFailed",
-					"Deployment failed with error: %s\nPod logs:\n%s", failureDetails, logs)
-			}
+			// Extract error message
+			cleanError := strings.TrimPrefix(failureDetails, "Error: ")
+			cleanError = strings.Split(cleanError, "\nPod logs:")[0] // Remove pod logs if present
 
-			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, failureDetails); err != nil {
+			// Record failure event
+			r.EventRecorder.Eventf(function, corev1.EventTypeWarning, "DeploymentFailed",
+				"Deployment failed: %s", cleanError)
+
+			// Update status
+			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, cleanError); err != nil {
 				log.Error(err, "Failed to update status to failed")
 				return ctrl.Result{}, err
 			}
@@ -176,11 +182,14 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// Cleanup the failed pod
 			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
 				log.Error(err, "Failed to cleanup deployment pod")
-				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed", "Failed to cleanup deployment pod")
+				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed",
+					"Failed to cleanup deployment pod after failure")
 			}
 
 			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 		}
+
+		// Still deploying, check again after delay
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
@@ -250,9 +259,13 @@ func extractErrorMessage(logs string) string {
 		// Extract the error message until the next newline or end of string
 		errorPart := logs[i:]
 		if newLine := strings.Index(errorPart, "\n"); newLine != -1 {
-			return errorPart[:newLine]
+			// Clean up the error message
+			errorMsg := errorPart[:newLine]
+			// Remove any extra "Error:" prefix if present
+			errorMsg = strings.TrimPrefix(errorMsg, "Error:")
+			return strings.TrimSpace(errorMsg)
 		}
-		return errorPart
+		return strings.TrimPrefix(errorPart, "Error:")
 	}
 	return "Deployment failed without specific error message"
 }
