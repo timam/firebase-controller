@@ -132,8 +132,21 @@ func (r *FunctionReconciler) updateStatus(ctx context.Context, function *firebas
 
 // isDeploymentSuccessful checks if the Firebase function deployment succeeded
 func (r *FunctionReconciler) isDeploymentSuccessful(ctx context.Context, function *firebasev1alpha1.Function) bool {
-	// TODO: Implement actual deployment status check
-	// This will involve checking the Firebase deployment status
+	pod := &corev1.Pod{}
+	podName := function.Name + "-firebase-deployer"
+	err := r.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: podName}, pod)
+	if err != nil {
+		return false
+	}
+
+	// Check container termination state
+	for _, containerStatus := range pod.Status.ContainerStatuses {
+		if containerStatus.State.Terminated != nil {
+			// Exit code 0 indicates successful deployment
+			return containerStatus.State.Terminated.ExitCode == 0
+		}
+	}
+
 	return false
 }
 
