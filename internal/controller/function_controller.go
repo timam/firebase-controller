@@ -50,6 +50,7 @@ type FunctionReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -69,6 +70,7 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	if function.Status.Status == "" {
+		r.EventRecorder.Event(function, corev1.EventTypeNormal, "Created", "Function resource created")
 		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending, "Function created"); err != nil {
 			log.Error(err, "Failed to update initial status")
 			return ctrl.Result{}, err
@@ -76,13 +78,15 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	if function.Status.Status == firebasev1alpha1.FunctionStatusPending {
-		// First create the deployment pod
+		// Create deployment pod
 		if err := r.createDeploymentPod(ctx, function); err != nil {
 			log.Error(err, "Failed to create deployment pod")
+			r.EventRecorder.Event(function, corev1.EventTypeWarning, "Failed", "Failed to create deployment pod")
 			return ctrl.Result{}, err
 		}
+		r.EventRecorder.Event(function, corev1.EventTypeNormal, "Created", "Deployment pod created")
 
-		// Then update the status to Deploying
+		// Update status to Deploying
 		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeploying, "Starting deployment"); err != nil {
 			log.Error(err, "Failed to update deploying status")
 			return ctrl.Result{}, err
@@ -97,14 +101,14 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				log.Error(err, "Failed to update status to deployed")
 				return ctrl.Result{}, err
 			}
-			r.recordEvent(ctx, function, corev1.EventTypeNormal, "Deployed", "Firebase function deployed successfully")
+			r.EventRecorder.Eventf(function, corev1.EventTypeNormal, "Deployed", "Firebase function deployed successfully")
 		} else if failed, failureDetails := r.isDeploymentFailed(ctx, function); failed {
-			// Get pod logs and record as event
 			pod := &corev1.Pod{}
 			podName := function.Name + "-firebase-deployer"
 			if err := r.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: podName}, pod); err == nil {
 				logs := r.getPodLogs(ctx, pod)
-				r.recordEvent(ctx, function, corev1.EventTypeWarning, "DeploymentFailed", logs)
+				r.EventRecorder.Eventf(function, corev1.EventTypeWarning, "DeploymentFailed",
+					"Deployment failed with error: %s\nPod logs:\n%s", failureDetails, logs)
 			}
 
 			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, failureDetails); err != nil {
@@ -115,6 +119,7 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// Cleanup the failed pod
 			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
 				log.Error(err, "Failed to cleanup deployment pod")
+				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed", "Failed to cleanup deployment pod")
 			}
 		}
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
