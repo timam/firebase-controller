@@ -88,6 +88,7 @@ type FunctionStatus struct {
 
 	RetryCount    int          `json:"retryCount,omitempty"`
 	LastRetryTime *metav1.Time `json:"lastRetryTime,omitempty"`
+	ImageHash     string       `json:"imageHash,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -19,6 +19,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	corev1 "k8s.io/api/core/v1"
@@ -71,126 +72,143 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Calculate current image hash
+	currentImageHash := fmt.Sprintf("%x", sha256.Sum256([]byte(function.Spec.Source.Container.Image)))
+
 	// Initialize status if empty
 	if function.Status.Status == "" {
-		r.EventRecorder.Event(function, corev1.EventTypeNormal, "Created", "Function resource created")
 		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending, "Function created"); err != nil {
 			log.Error(err, "Failed to update initial status")
 			return ctrl.Result{}, err
 		}
+		r.EventRecorder.Event(function, corev1.EventTypeNormal, "Created", "Function resource created")
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	// Handle failed state with retries
-	if function.Status.Status == firebasev1alpha1.FunctionStatusFailed {
-		if function.Status.RetryCount >= maxRetries {
-			msg := fmt.Sprintf("Failed after %d retries. Manual intervention required.", maxRetries)
-			r.EventRecorder.Event(function, corev1.EventTypeWarning, "RetryLimitExceeded", msg)
-			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, msg); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
+	// Handle image changes for deployed functions
+	if function.Status.Status == firebasev1alpha1.FunctionStatusDeployed &&
+		function.Status.ImageHash != currentImageHash {
+		log.Info("Container image changed, triggering new deployment")
+
+		// Clean up existing deployment pod first
+		if err := r.cleanupDeploymentPod(ctx, function); err != nil {
+			log.Error(err, "Failed to cleanup existing deployment pod")
+			// Continue even if cleanup fails
 		}
 
-		// Calculate backoff duration
-		backoff := time.Duration(math.Pow(2, float64(function.Status.RetryCount))) * initialRetryDelay
-
-		// Check if enough time has passed since last retry
-		if function.Status.LastRetryTime != nil {
-			nextRetryTime := function.Status.LastRetryTime.Add(backoff)
-			if time.Now().Before(nextRetryTime) {
-				return ctrl.Result{RequeueAfter: time.Until(nextRetryTime)}, nil
-			}
-		}
-
-		// Increment retry count and update last retry time
-		function.Status.RetryCount++
-		now := metav1.Now()
-		function.Status.LastRetryTime = &now
-
-		msg := fmt.Sprintf("Retrying deployment (attempt %d of %d)", function.Status.RetryCount, maxRetries)
-		r.EventRecorder.Event(function, corev1.EventTypeNormal, "RetryingDeployment", msg)
-
-		// Reset to pending state for retry
-		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending, msg); err != nil {
+		// Update status to pending for redeployment
+		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending,
+			"Redeploying due to image change"); err != nil {
 			return ctrl.Result{}, err
 		}
+		r.EventRecorder.Event(function, corev1.EventTypeNormal, "ImageChanged",
+			"Detected change in container image, triggering new deployment")
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	// Handle pending state
 	if function.Status.Status == firebasev1alpha1.FunctionStatusPending {
-		// Cleanup any existing pods before creating new one
-		if err := r.cleanupDeploymentPod(ctx, function); err != nil {
-			log.Error(err, "Failed to cleanup existing deployment pod")
-		}
-
-		// Create deployment pod
+		// Create new deployment pod
 		if err := r.createDeploymentPod(ctx, function); err != nil {
 			log.Error(err, "Failed to create deployment pod")
-			r.EventRecorder.Event(function, corev1.EventTypeWarning, "Failed", "Failed to create deployment pod")
+			r.EventRecorder.Event(function, corev1.EventTypeWarning, "Failed",
+				"Failed to create deployment pod")
+
+			// Update status to failed
+			if updateErr := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed,
+				err.Error()); updateErr != nil {
+				log.Error(updateErr, "Failed to update status after pod creation failure")
+			}
+			return ctrl.Result{}, err
+		}
+
+		// Update status to deploying
+		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeploying,
+			"Starting deployment"); err != nil {
 			return ctrl.Result{}, err
 		}
 		r.EventRecorder.Event(function, corev1.EventTypeNormal, "Created", "Deployment pod created")
-
-		// Update status to Deploying
-		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeploying, "Starting deployment"); err != nil {
-			log.Error(err, "Failed to update deploying status")
-			return ctrl.Result{}, err
-		}
-
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
 	// Handle deploying state
 	if function.Status.Status == firebasev1alpha1.FunctionStatusDeploying {
 		if r.isDeploymentSuccessful(ctx, function) {
-			// Reset retry count on successful deployment
+			// Update status and image hash after successful deployment
+			function.Status.ImageHash = currentImageHash
 			function.Status.RetryCount = 0
 			function.Status.LastRetryTime = nil
 
-			// Cleanup the successful deployment pod first
 			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
 				log.Error(err, "Failed to cleanup deployment pod")
-				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed",
-					"Failed to cleanup deployment pod after successful deployment")
 			}
 
-			// Update status and record event
-			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed, "Deploy complete!"); err != nil {
-				log.Error(err, "Failed to update status to deployed")
+			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed,
+				"Deploy complete!"); err != nil {
 				return ctrl.Result{}, err
 			}
 			r.EventRecorder.Event(function, corev1.EventTypeNormal, "Deployed",
 				"Firebase function deployed successfully")
-
 			return ctrl.Result{}, nil
-		} else if failed, failureDetails := r.isDeploymentFailed(ctx, function); failed {
-			// Extract error message
-			cleanError := strings.TrimPrefix(failureDetails, "Error: ")
-			cleanError = strings.Split(cleanError, "\nPod logs:")[0] // Remove pod logs if present
+		}
 
-			// Record failure event
-			r.EventRecorder.Eventf(function, corev1.EventTypeWarning, "DeploymentFailed",
-				"Deployment failed: %s", cleanError)
+		if failed, failureDetails := r.isDeploymentFailed(ctx, function); failed {
+			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
+				log.Error(err, "Failed to cleanup failed deployment pod")
+			}
 
-			// Update status
-			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, cleanError); err != nil {
-				log.Error(err, "Failed to update status to failed")
+			// Increment retry count
+			function.Status.RetryCount++
+			now := metav1.Now()
+			function.Status.LastRetryTime = &now
+
+			if function.Status.RetryCount >= maxRetries {
+				msg := fmt.Sprintf("Failed after %d retries: %s", maxRetries, failureDetails)
+				if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, msg); err != nil {
+					return ctrl.Result{}, err
+				}
+				r.EventRecorder.Event(function, corev1.EventTypeWarning, "RetryLimitExceeded", msg)
+				return ctrl.Result{}, nil
+			}
+
+			// Calculate backoff for next retry
+			backoff := time.Duration(math.Pow(2, float64(function.Status.RetryCount))) * initialRetryDelay
+			msg := fmt.Sprintf("Deployment failed, will retry in %v (attempt %d/%d): %s",
+				backoff, function.Status.RetryCount, maxRetries, failureDetails)
+
+			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, msg); err != nil {
 				return ctrl.Result{}, err
 			}
-
-			// Cleanup the failed pod
-			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
-				log.Error(err, "Failed to cleanup deployment pod")
-				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed",
-					"Failed to cleanup deployment pod after failure")
-			}
-
-			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+			r.EventRecorder.Event(function, corev1.EventTypeWarning, "DeploymentFailed", msg)
+			return ctrl.Result{RequeueAfter: backoff}, nil
 		}
 
 		// Still deploying, check again after delay
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
+	// Handle failed state
+	if function.Status.Status == firebasev1alpha1.FunctionStatusFailed {
+		if function.Status.RetryCount < maxRetries {
+			// Calculate backoff duration
+			backoff := time.Duration(math.Pow(2, float64(function.Status.RetryCount))) * initialRetryDelay
+
+			// Check if enough time has passed for retry
+			if function.Status.LastRetryTime != nil {
+				nextRetryTime := function.Status.LastRetryTime.Add(backoff)
+				if time.Now().Before(nextRetryTime) {
+					return ctrl.Result{RequeueAfter: time.Until(nextRetryTime)}, nil
+				}
+			}
+
+			// Reset to pending for retry
+			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending,
+				fmt.Sprintf("Retrying deployment (attempt %d/%d)",
+					function.Status.RetryCount+1, maxRetries)); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 	}
 
 	return ctrl.Result{}, nil
