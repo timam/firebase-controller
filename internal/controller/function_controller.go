@@ -19,11 +19,13 @@ package controller
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	"math"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"strings"
 	"time"
@@ -34,6 +36,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	firebasev1alpha1 "github.com/timam/firebase-controller.git/api/v1alpha1"
+)
+
+const (
+	maxRetries        = 3
+	initialRetryDelay = 30 * time.Second
 )
 
 // FunctionReconciler reconciles a Function object
@@ -54,11 +61,6 @@ type FunctionReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Function object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -69,6 +71,7 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Initialize status if empty
 	if function.Status.Status == "" {
 		r.EventRecorder.Event(function, corev1.EventTypeNormal, "Created", "Function resource created")
 		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending, "Function created"); err != nil {
@@ -77,7 +80,50 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 
+	// Handle failed state with retries
+	if function.Status.Status == firebasev1alpha1.FunctionStatusFailed {
+		if function.Status.RetryCount >= maxRetries {
+			msg := fmt.Sprintf("Failed after %d retries. Manual intervention required.", maxRetries)
+			r.EventRecorder.Event(function, corev1.EventTypeWarning, "RetryLimitExceeded", msg)
+			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, msg); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+
+		// Calculate backoff duration
+		backoff := time.Duration(math.Pow(2, float64(function.Status.RetryCount))) * initialRetryDelay
+
+		// Check if enough time has passed since last retry
+		if function.Status.LastRetryTime != nil {
+			nextRetryTime := function.Status.LastRetryTime.Add(backoff)
+			if time.Now().Before(nextRetryTime) {
+				return ctrl.Result{RequeueAfter: time.Until(nextRetryTime)}, nil
+			}
+		}
+
+		// Increment retry count and update last retry time
+		function.Status.RetryCount++
+		now := metav1.Now()
+		function.Status.LastRetryTime = &now
+
+		msg := fmt.Sprintf("Retrying deployment (attempt %d of %d)", function.Status.RetryCount, maxRetries)
+		r.EventRecorder.Event(function, corev1.EventTypeNormal, "RetryingDeployment", msg)
+
+		// Reset to pending state for retry
+		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending, msg); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	// Handle pending state
 	if function.Status.Status == firebasev1alpha1.FunctionStatusPending {
+		// Cleanup any existing pods before creating new one
+		if err := r.cleanupDeploymentPod(ctx, function); err != nil {
+			log.Error(err, "Failed to cleanup existing deployment pod")
+		}
+
 		// Create deployment pod
 		if err := r.createDeploymentPod(ctx, function); err != nil {
 			log.Error(err, "Failed to create deployment pod")
@@ -95,13 +141,24 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
+	// Handle deploying state
 	if function.Status.Status == firebasev1alpha1.FunctionStatusDeploying {
 		if r.isDeploymentSuccessful(ctx, function) {
+			// Reset retry count on successful deployment
+			function.Status.RetryCount = 0
+			function.Status.LastRetryTime = nil
+
 			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed, "Deploy complete!"); err != nil {
 				log.Error(err, "Failed to update status to deployed")
 				return ctrl.Result{}, err
 			}
-			r.EventRecorder.Eventf(function, corev1.EventTypeNormal, "Deployed", "Firebase function deployed successfully")
+			r.EventRecorder.Event(function, corev1.EventTypeNormal, "Deployed", "Firebase function deployed successfully")
+
+			// Cleanup the successful deployment pod
+			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
+				log.Error(err, "Failed to cleanup deployment pod")
+				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed", "Failed to cleanup deployment pod")
+			}
 		} else if failed, failureDetails := r.isDeploymentFailed(ctx, function); failed {
 			pod := &corev1.Pod{}
 			podName := function.Name + "-firebase-deployer"
@@ -121,6 +178,8 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				log.Error(err, "Failed to cleanup deployment pod")
 				r.EventRecorder.Event(function, corev1.EventTypeWarning, "CleanupFailed", "Failed to cleanup deployment pod")
 			}
+
+			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 		}
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 	}

@@ -97,9 +97,14 @@ spec:
           status:
             description: FunctionStatus defines the observed state of Function
             properties:
+              lastRetryTime:
+                format: date-time
+                type: string
               message:
                 description: Message provides details about the current Status
                 type: string
+              retryCount:
+                type: integer
               status:
                 default: Pending
                 description: Status represents the current state of the function deployment

@@ -85,6 +85,9 @@ type FunctionStatus struct {
 	// Message provides details about the current Status
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	RetryCount    int          `json:"retryCount,omitempty"`
+	LastRetryTime *metav1.Time `json:"lastRetryTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
