@@ -19,10 +19,12 @@ package controller
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"time"
 
@@ -37,8 +39,9 @@ import (
 // FunctionReconciler reconciles a Function object
 type FunctionReconciler struct {
 	client.Client
-	Scheme    *runtime.Scheme
-	K8sClient *kubernetes.Clientset
+	Scheme        *runtime.Scheme
+	K8sClient     *kubernetes.Clientset
+	EventRecorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=firebase.timam.dev,resources=functions,verbs=get;list;watch;create;update;patch;delete
@@ -90,24 +93,28 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	if function.Status.Status == firebasev1alpha1.FunctionStatusDeploying {
 		if r.isDeploymentSuccessful(ctx, function) {
-			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed, "Deployment successful"); err != nil {
+			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed, ""); err != nil {
+				log.Error(err, "Failed to update status to deployed")
 				return ctrl.Result{}, err
 			}
-		} else if r.isDeploymentFailed(ctx, function) {
-			// Get the pod
+			r.recordEvent(ctx, function, corev1.EventTypeNormal, "Deployed", "Firebase function deployed successfully")
+		} else if failed, failureDetails := r.isDeploymentFailed(ctx, function); failed {
 			pod := &corev1.Pod{}
 			podName := function.Name + "-firebase-deployer"
 			if err := r.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: podName}, pod); err == nil {
-				// Get pod logs for error message
-				failureReason := r.getPodLogs(ctx, pod)
-				// Update status with failure reason
-				if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, failureReason); err != nil {
-					return ctrl.Result{}, err
-				}
-				// Cleanup the failed pod
-				if err := r.cleanupDeploymentPod(ctx, function); err != nil {
-					log.Error(err, "Failed to cleanup deployment pod")
-				}
+				logs := r.getPodLogs(ctx, pod)
+				r.recordEvent(ctx, function, corev1.EventTypeWarning, "DeploymentFailed",
+					fmt.Sprintf("Deployment failed: %s\nPod logs:\n%s", failureDetails, logs))
+			}
+
+			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, failureDetails); err != nil {
+				log.Error(err, "Failed to update status to failed")
+				return ctrl.Result{}, err
+			}
+
+			// Cleanup the failed pod - use the existing log variable
+			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
+				log.Error(err, "Failed to cleanup deployment pod")
 			}
 		}
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
@@ -131,27 +138,30 @@ func (r *FunctionReconciler) isDeploymentSuccessful(ctx context.Context, functio
 }
 
 // isDeploymentFailed checks if the Firebase function deployment failed
-func (r *FunctionReconciler) isDeploymentFailed(ctx context.Context, function *firebasev1alpha1.Function) bool {
+func (r *FunctionReconciler) isDeploymentFailed(ctx context.Context, function *firebasev1alpha1.Function) (bool, string) {
 	pod := &corev1.Pod{}
 	podName := function.Name + "-firebase-deployer"
 	err := r.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: podName}, pod)
 	if err != nil {
-		return false
+		return false, ""
 	}
 
-	// Check if pod is in failed state
-	if pod.Status.Phase == corev1.PodFailed {
-		return true
-	}
-
-	// Check for container errors
+	// Check container termination state
 	for _, containerStatus := range pod.Status.ContainerStatuses {
-		if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.ExitCode != 0 {
-			return true
+		if containerStatus.State.Terminated != nil {
+			exitCode := containerStatus.State.Terminated.ExitCode
+			reason := containerStatus.State.Terminated.Reason
+			message := containerStatus.State.Terminated.Message
+
+			// Firebase CLI returns non-zero exit code on failure
+			if exitCode != 0 {
+				return true, fmt.Sprintf("Exit Code: %d, Reason: %s, Message: %s",
+					exitCode, reason, message)
+			}
 		}
 	}
 
-	return false
+	return false, ""
 }
 
 // createDeploymentPod creates a Pod to run the Firebase deployment
@@ -167,11 +177,34 @@ func (r *FunctionReconciler) createDeploymentPod(ctx context.Context, function *
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			Volumes: []corev1.Volume{
+				{
+					Name: "google-credentials",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: function.Spec.Project.Auth.ServiceAccountKey.SecretName,
+						},
+					},
+				},
+			},
 			Containers: []corev1.Container{
 				{
 					Name:            "firebase-deployer",
 					Image:           function.Spec.Source.Container.Image,
 					ImagePullPolicy: corev1.PullPolicy(function.Spec.Source.Container.ImagePullPolicy),
+					Env: []corev1.EnvVar{
+						{
+							Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+							Value: function.Spec.Project.Auth.ServiceAccountKey.MountPath + "/firebase-credentials.json",
+						},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "google-credentials",
+							MountPath: function.Spec.Project.Auth.ServiceAccountKey.MountPath,
+							ReadOnly:  true,
+						},
+					},
 				},
 			},
 		},
@@ -215,6 +248,10 @@ func (r *FunctionReconciler) getPodLogs(ctx context.Context, pod *corev1.Pod) st
 	return buf.String()
 }
 
+func (r *FunctionReconciler) recordEvent(ctx context.Context, function *firebasev1alpha1.Function, eventtype, reason, message string) {
+	r.EventRecorder.Event(function, eventtype, reason, message)
+}
+
 // cleanupDeploymentPod deletes the deployment pod
 func (r *FunctionReconciler) cleanupDeploymentPod(ctx context.Context, function *firebasev1alpha1.Function) error {
 	pod := &corev1.Pod{
@@ -238,6 +275,9 @@ func (r *FunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return err
 	}
+
+	// Set up event recorder
+	r.EventRecorder = mgr.GetEventRecorderFor("firebase-controller")
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&firebasev1alpha1.Function{}).
