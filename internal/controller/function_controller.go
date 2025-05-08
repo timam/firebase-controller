@@ -42,6 +42,7 @@ import (
 const (
 	maxRetries        = 3
 	initialRetryDelay = 30 * time.Second
+	podNamePrefix     = "firebase-function-deployer"
 )
 
 // FunctionReconciler reconciles a Function object
@@ -224,8 +225,10 @@ func (r *FunctionReconciler) updateStatus(ctx context.Context, function *firebas
 // isDeploymentSuccessful checks if the Firebase function deployment succeeded
 func (r *FunctionReconciler) isDeploymentSuccessful(ctx context.Context, function *firebasev1alpha1.Function) bool {
 	pod := &corev1.Pod{}
-	podName := function.Name + "-firebase-deployer"
-	err := r.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: podName}, pod)
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: function.Namespace,
+		Name:      getPodName(function),
+	}, pod)
 	if err != nil {
 		return false
 	}
@@ -248,8 +251,10 @@ func (r *FunctionReconciler) isDeploymentSuccessful(ctx context.Context, functio
 // isDeploymentFailed checks if the Firebase function deployment failed
 func (r *FunctionReconciler) isDeploymentFailed(ctx context.Context, function *firebasev1alpha1.Function) (bool, string) {
 	pod := &corev1.Pod{}
-	podName := function.Name + "-firebase-deployer"
-	err := r.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: podName}, pod)
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: function.Namespace,
+		Name:      getPodName(function),
+	}, pod)
 	if err != nil {
 		return false, ""
 	}
@@ -292,11 +297,13 @@ func extractErrorMessage(logs string) string {
 func (r *FunctionReconciler) createDeploymentPod(ctx context.Context, function *firebasev1alpha1.Function) error {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      function.Name + "-firebase-deployer",
+			Name:      getPodName(function),
 			Namespace: function.Namespace,
 			Labels: map[string]string{
-				"app":      "firebase-deployer",
-				"function": function.Name,
+				"app.kubernetes.io/name":      "firebase-function-deployer",
+				"app.kubernetes.io/instance":  function.Name,
+				"app.kubernetes.io/component": "deployer",
+				"app.kubernetes.io/part-of":   "firebase-controller",
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -380,11 +387,16 @@ func (r *FunctionReconciler) recordEvent(ctx context.Context, function *firebase
 func (r *FunctionReconciler) cleanupDeploymentPod(ctx context.Context, function *firebasev1alpha1.Function) error {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      function.Name + "-firebase-deployer",
+			Name:      getPodName(function),
 			Namespace: function.Namespace,
 		},
 	}
-	return r.Delete(ctx, pod)
+	err := r.Delete(ctx, pod)
+	if err != nil && client.IgnoreNotFound(err) != nil {
+		// Only return error if it's not a "not found" error
+		return err
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -406,4 +418,9 @@ func (r *FunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&firebasev1alpha1.Function{}).
 		Complete(r)
+}
+
+// Helper function to generate consistent pod names
+func getPodName(function *firebasev1alpha1.Function) string {
+	return fmt.Sprintf("%s-%s", podNamePrefix, function.Name)
 }
