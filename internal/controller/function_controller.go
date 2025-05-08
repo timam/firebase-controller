@@ -19,13 +19,13 @@ package controller
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -93,18 +93,18 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	if function.Status.Status == firebasev1alpha1.FunctionStatusDeploying {
 		if r.isDeploymentSuccessful(ctx, function) {
-			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed, ""); err != nil {
+			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed, "Deploy complete!"); err != nil {
 				log.Error(err, "Failed to update status to deployed")
 				return ctrl.Result{}, err
 			}
 			r.recordEvent(ctx, function, corev1.EventTypeNormal, "Deployed", "Firebase function deployed successfully")
 		} else if failed, failureDetails := r.isDeploymentFailed(ctx, function); failed {
+			// Get pod logs and record as event
 			pod := &corev1.Pod{}
 			podName := function.Name + "-firebase-deployer"
 			if err := r.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: podName}, pod); err == nil {
 				logs := r.getPodLogs(ctx, pod)
-				r.recordEvent(ctx, function, corev1.EventTypeWarning, "DeploymentFailed",
-					fmt.Sprintf("Deployment failed: %s\nPod logs:\n%s", failureDetails, logs))
+				r.recordEvent(ctx, function, corev1.EventTypeWarning, "DeploymentFailed", logs)
 			}
 
 			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, failureDetails); err != nil {
@@ -112,7 +112,7 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				return ctrl.Result{}, err
 			}
 
-			// Cleanup the failed pod - use the existing log variable
+			// Cleanup the failed pod
 			if err := r.cleanupDeploymentPod(ctx, function); err != nil {
 				log.Error(err, "Failed to cleanup deployment pod")
 			}
@@ -142,8 +142,12 @@ func (r *FunctionReconciler) isDeploymentSuccessful(ctx context.Context, functio
 	// Check container termination state
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		if containerStatus.State.Terminated != nil {
-			// Exit code 0 indicates successful deployment
-			return containerStatus.State.Terminated.ExitCode == 0
+			if containerStatus.State.Terminated.ExitCode == 0 {
+				// Verify success message in logs
+				logs := r.getPodLogs(ctx, pod)
+				return strings.Contains(logs, "Deploy complete!")
+			}
+			return false
 		}
 	}
 
@@ -163,18 +167,30 @@ func (r *FunctionReconciler) isDeploymentFailed(ctx context.Context, function *f
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		if containerStatus.State.Terminated != nil {
 			exitCode := containerStatus.State.Terminated.ExitCode
-			reason := containerStatus.State.Terminated.Reason
-			message := containerStatus.State.Terminated.Message
-
-			// Firebase CLI returns non-zero exit code on failure
 			if exitCode != 0 {
-				return true, fmt.Sprintf("Exit Code: %d, Reason: %s, Message: %s",
-					exitCode, reason, message)
+				// Get pod logs to extract error message
+				logs := r.getPodLogs(ctx, pod)
+				errorMsg := extractErrorMessage(logs)
+				return true, errorMsg
 			}
 		}
 	}
 
 	return false, ""
+}
+
+// extractErrorMessage extracts the error message from the logs
+func extractErrorMessage(logs string) string {
+	// Look for error messages in the logs
+	if i := strings.Index(logs, "Error:"); i != -1 {
+		// Extract the error message until the next newline or end of string
+		errorPart := logs[i:]
+		if newLine := strings.Index(errorPart, "\n"); newLine != -1 {
+			return errorPart[:newLine]
+		}
+		return errorPart
+	}
+	return "Deployment failed without specific error message"
 }
 
 // createDeploymentPod creates a Pod to run the Firebase deployment
