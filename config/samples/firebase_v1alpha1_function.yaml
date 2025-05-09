@@ -6,7 +6,8 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: function-sample
 spec:
-  runtime: nodejs18
+  successfulDeploymentsHistoryLimit: 3
+  failedDeploymentsHistoryLimit: 1
   source:
     container:
       image: timam/firebase-test:006
@@ -16,4 +17,3 @@ spec:
       serviceAccountKey:
         secretName: firebase-credentials
         mountPath: /var/secrets/google
-

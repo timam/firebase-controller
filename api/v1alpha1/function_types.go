@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -32,9 +33,17 @@ const (
 
 // FunctionSpec defines the desired state of Function
 type FunctionSpec struct {
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=nodejs18;nodejs16
-	Runtime string `json:"runtime"`
+	// Number of successful deployment history to keep
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	SuccessfulDeploymentsHistoryLimit *int32 `json:"successfulDeploymentsHistoryLimit,omitempty"`
+
+	// Number of failed deployment history to keep
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	FailedDeploymentsHistoryLimit *int32 `json:"failedDeploymentsHistoryLimit,omitempty"`
 
 	// +kubebuilder:validation:Required
 	Source SourceSpec `json:"source"`
@@ -76,7 +85,18 @@ type ServiceAccountKeySpec struct {
 
 // FunctionStatus defines the observed state of Function
 type FunctionStatus struct {
-	// Status represents the current state of the function deployment (Pending, Deploying, Deployed, Failed)
+	// ObservedGeneration represents the .metadata.generation that the condition was set based upon.
+	// For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Represents the latest available observations of a function's current state
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Status represents the current state of the function deployment
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=Pending;Deploying;Deployed;Failed
 	// +kubebuilder:default=Pending
@@ -86,15 +106,61 @@ type FunctionStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	RetryCount    int          `json:"retryCount,omitempty"`
-	LastRetryTime *metav1.Time `json:"lastRetryTime,omitempty"`
-	ImageHash     string       `json:"imageHash,omitempty"`
+	// CurrentRevision indicates the version of the Function spec that was successfully deployed
+	// +optional
+	CurrentRevision string `json:"currentRevision,omitempty"`
+
+	// LastSuccessfulDeployment is the timestamp of the last successful deployment
+	// +optional
+	LastSuccessfulDeployment *metav1.Time `json:"lastSuccessfulDeployment,omitempty"`
+
+	// Number of successful deployment history to keep
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=0
+	SuccessfulDeploymentsHistoryLimit *int32 `json:"successfulDeploymentsHistoryLimit,omitempty"`
+
+	// Number of failed deployment history to keep
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	FailedDeploymentsHistoryLimit *int32 `json:"failedDeploymentsHistoryLimit,omitempty"`
+
+	// Active holds pointers to currently executing deployments
+	// +optional
+	Active []corev1.ObjectReference `json:"active,omitempty"`
+
+	// History holds references to completed deployments, sorted by completion timestamp
+	// +optional
+	// +patchStrategy=merge
+	History []DeploymentHistory `json:"history,omitempty"`
+}
+
+type DeploymentHistory struct {
+	// Job name of the completed deployment
+	JobName string `json:"jobName"`
+
+	// When the deployment completed
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// Whether the deployment was successful
+	Successful bool `json:"successful"`
+
+	// Generation of the Function spec that was deployed
+	Generation int64 `json:"generation"`
+
+	// Hash of the Function spec that was deployed
+	SpecHash string `json:"specHash"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="NAMESPACE",type="string",JSONPath=".metadata.namespace"
 // +kubebuilder:printcolumn:name="STATUS",type="string",JSONPath=".status.status"
+// +kubebuilder:printcolumn:name="REVISION",type="string",JSONPath=".status.currentRevision"
+// +kubebuilder:printcolumn:name="SUCCESSFUL",type="integer",JSONPath=".status.successfulDeploymentsHistoryLimit"
+// +kubebuilder:printcolumn:name="FAILED",type="integer",JSONPath=".status.failedDeploymentsHistoryLimit"
+// +kubebuilder:printcolumn:name="LAST-DEPLOY",type="date",JSONPath=".status.lastSuccessfulDeployment"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Function is the Schema for the functions API

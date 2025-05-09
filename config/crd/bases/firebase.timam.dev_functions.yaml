@@ -21,6 +21,18 @@ spec:
     - jsonPath: .status.status
       name: STATUS
       type: string
+    - jsonPath: .status.currentRevision
+      name: REVISION
+      type: string
+    - jsonPath: .status.successfulDeploymentsHistoryLimit
+      name: SUCCESSFUL
+      type: integer
+    - jsonPath: .status.failedDeploymentsHistoryLimit
+      name: FAILED
+      type: integer
+    - jsonPath: .status.lastSuccessfulDeployment
+      name: LAST-DEPLOY
+      type: date
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
@@ -49,6 +61,12 @@ spec:
           spec:
             description: FunctionSpec defines the desired state of Function
             properties:
+              failedDeploymentsHistoryLimit:
+                default: 1
+                description: Number of failed deployment history to keep
+                format: int32
+                minimum: 1
+                type: integer
               project:
                 properties:
                   auth:
@@ -69,11 +87,6 @@ spec:
                 required:
                 - auth
                 type: object
-              runtime:
-                enum:
-                - nodejs18
-                - nodejs16
-                type: string
               source:
                 properties:
                   container:
@@ -89,34 +102,192 @@ spec:
                 required:
                 - container
                 type: object
+              successfulDeploymentsHistoryLimit:
+                default: 3
+                description: Number of successful deployment history to keep
+                format: int32
+                minimum: 1
+                type: integer
             required:
             - project
-            - runtime
             - source
             type: object
           status:
             description: FunctionStatus defines the observed state of Function
             properties:
-              imageHash:
+              active:
+                description: Active holds pointers to currently executing deployments
+                items:
+                  description: ObjectReference contains enough information to let
+                    you inspect or modify the referred object.
+                  properties:
+                    apiVersion:
+                      description: API version of the referent.
+                      type: string
+                    fieldPath:
+                      description: |-
+                        If referring to a piece of an object instead of an entire object, this string
+                        should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2].
+                        For example, if the object reference is to a container within a pod, this would take on a value like:
+                        "spec.containers{name}" (where "name" refers to the name of the container that triggered
+                        the event) or if no container name is specified "spec.containers[2]" (container with
+                        index 2 in this pod). This syntax is chosen only to have some well-defined way of
+                        referencing a part of an object.
+                      type: string
+                    kind:
+                      description: |-
+                        Kind of the referent.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                      type: string
+                    name:
+                      description: |-
+                        Name of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+                      type: string
+                    resourceVersion:
+                      description: |-
+                        Specific resourceVersion to which this reference is made, if any.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency
+                      type: string
+                    uid:
+                      description: |-
+                        UID of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              conditions:
+                description: Represents the latest available observations of a function's
+                  current state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentRevision:
+                description: CurrentRevision indicates the version of the Function
+                  spec that was successfully deployed
                 type: string
-              lastRetryTime:
+              failedDeploymentsHistoryLimit:
+                default: 1
+                description: Number of failed deployment history to keep
+                format: int32
+                minimum: 0
+                type: integer
+              history:
+                description: History holds references to completed deployments, sorted
+                  by completion timestamp
+                items:
+                  properties:
+                    completionTime:
+                      description: When the deployment completed
+                      format: date-time
+                      type: string
+                    generation:
+                      description: Generation of the Function spec that was deployed
+                      format: int64
+                      type: integer
+                    jobName:
+                      description: Job name of the completed deployment
+                      type: string
+                    specHash:
+                      description: Hash of the Function spec that was deployed
+                      type: string
+                    successful:
+                      description: Whether the deployment was successful
+                      type: boolean
+                  required:
+                  - generation
+                  - jobName
+                  - specHash
+                  - successful
+                  type: object
+                type: array
+              lastSuccessfulDeployment:
+                description: LastSuccessfulDeployment is the timestamp of the last
+                  successful deployment
                 format: date-time
                 type: string
               message:
                 description: Message provides details about the current Status
                 type: string
-              retryCount:
+              observedGeneration:
+                description: |-
+                  ObservedGeneration represents the .metadata.generation that the condition was set based upon.
+                  For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                format: int64
                 type: integer
               status:
                 default: Pending
                 description: Status represents the current state of the function deployment
-                  (Pending, Deploying, Deployed, Failed)
                 enum:
                 - Pending
                 - Deploying
                 - Deployed
                 - Failed
                 type: string
+              successfulDeploymentsHistoryLimit:
+                default: 3
+                description: Number of successful deployment history to keep
+                format: int32
+                minimum: 0
+                type: integer
             required:
             - status
             type: object
