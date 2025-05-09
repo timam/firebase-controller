@@ -45,6 +45,12 @@ type FunctionSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	FailedDeploymentsHistoryLimit *int32 `json:"failedDeploymentsHistoryLimit,omitempty"`
 
+	// Maximum number of retry attempts for failed deployments
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	MaxRetries *int32 `json:"maxRetries,omitempty"`
+
 	// +kubebuilder:validation:Required
 	Source SourceSpec `json:"source"`
 
@@ -125,6 +131,10 @@ type FunctionStatus struct {
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
 	FailedDeploymentsHistoryLimit *int32 `json:"failedDeploymentsHistoryLimit,omitempty"`
+
+	// RetryCount tracks the number of deployment retry attempts
+	// +optional
+	RetryCount int32 `json:"retryCount,omitempty"`
 
 	// Active holds pointers to currently executing deployments
 	// +optional

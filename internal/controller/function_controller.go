@@ -139,6 +139,7 @@ func (r *FunctionReconciler) handleDeployingState(ctx context.Context, function 
 			function.Status.CurrentRevision = fmt.Sprintf("%d-%s",
 				function.Generation,
 				job.Labels["firebase.timam.dev/spec-hash"])
+			function.Status.RetryCount = 0
 
 			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed,
 				"Deployment completed successfully"); err != nil {
@@ -178,6 +179,11 @@ func (r *FunctionReconciler) handleSpecChange(ctx context.Context, function *fir
 }
 
 func (r *FunctionReconciler) handlePendingState(ctx context.Context, function *firebasev1alpha1.Function) (ctrl.Result, error) {
+	if len(function.Status.Active) > 0 {
+		log.FromContext(ctx).Info("Active jobs already exist, skipping new job creation")
+		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
 	if err := r.createDeploymentJob(ctx, function); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to create deployment job")
 		r.EventRecorder.Event(function, corev1.EventTypeWarning, "Failed",
@@ -200,10 +206,26 @@ func (r *FunctionReconciler) handlePendingState(ctx context.Context, function *f
 }
 
 func (r *FunctionReconciler) handleFailedState(ctx context.Context, function *firebasev1alpha1.Function) (ctrl.Result, error) {
-	if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending,
-		"Retrying deployment"); err != nil {
+	maxRetries := int32(3) // default value
+	if function.Spec.MaxRetries != nil {
+		maxRetries = *function.Spec.MaxRetries
+	}
+
+	if function.Status.RetryCount >= maxRetries {
+		err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed,
+			fmt.Sprintf("Deployment failed permanently after %d retries", maxRetries))
 		return ctrl.Result{}, err
 	}
+
+	function.Status.RetryCount++
+	if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending,
+		fmt.Sprintf("Retrying deployment (attempt %d/%d)", function.Status.RetryCount, maxRetries)); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	r.EventRecorder.Event(function, corev1.EventTypeNormal, "Retrying",
+		fmt.Sprintf("Retrying deployment (attempt %d/%d)", function.Status.RetryCount, maxRetries))
+
 	return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 }
 

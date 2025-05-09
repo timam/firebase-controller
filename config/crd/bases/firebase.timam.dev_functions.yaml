@@ -67,6 +67,12 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              maxRetries:
+                default: 3
+                description: Maximum number of retry attempts for failed deployments
+                format: int32
+                minimum: 1
+                type: integer
               project:
                 properties:
                   auth:
@@ -272,6 +278,10 @@ spec:
                   ObservedGeneration represents the .metadata.generation that the condition was set based upon.
                   For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
                 format: int64
+                type: integer
+              retryCount:
+                description: RetryCount tracks the number of deployment retry attempts
+                format: int32
                 type: integer
               status:
                 default: Pending

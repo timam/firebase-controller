@@ -8,6 +8,7 @@ metadata:
 spec:
   successfulDeploymentsHistoryLimit: 3
   failedDeploymentsHistoryLimit: 1
+  maxRetries: 3  # Add this line
   source:
     container:
       image: timam/firebase-test:006
