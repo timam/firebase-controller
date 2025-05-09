@@ -82,6 +82,8 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.handleDeployingState(ctx, function)
 	case firebasev1alpha1.FunctionStatusFailed:
 		return r.handleFailedState(ctx, function)
+	case firebasev1alpha1.FunctionStatusDeployed:
+		return r.handleDeployedState(ctx, function)
 	}
 
 	return ctrl.Result{}, nil
@@ -147,6 +149,13 @@ func (r *FunctionReconciler) handleDeployingState(ctx context.Context, function 
 
 		// Check for success
 		if job.Status.Succeeded > 0 && job.Status.CompletionTime != nil {
+			// Get logs from the deployment job
+			logs, err := r.getJobLogs(ctx, job)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to retrieve deployment logs: %w", err)
+			}
+
+			// Update deployment metadata
 			now := metav1.Now()
 			function.Status.LastSuccessfulDeployment = &now
 			function.Status.ObservedGeneration = function.Generation
@@ -155,10 +164,12 @@ func (r *FunctionReconciler) handleDeployingState(ctx context.Context, function 
 				job.Labels["firebase.timam.dev/spec-hash"])
 			function.Status.RetryCount = 0
 
+			// Update to final Deployed status with the logs
 			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusDeployed,
-				"Deployment completed successfully"); err != nil {
+				fmt.Sprintf("Deployment completed successfully: %s", logs)); err != nil {
 				return ctrl.Result{}, err
 			}
+
 			r.EventRecorder.Event(function, corev1.EventTypeNormal, "Deployed",
 				"Firebase function deployed successfully")
 			return ctrl.Result{}, nil
@@ -260,6 +271,33 @@ func (r *FunctionReconciler) handleFailedState(ctx context.Context, function *fi
 		fmt.Sprintf("Retrying deployment (attempt %d/%d)", function.Status.RetryCount, maxRetries))
 
 	return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+}
+
+func (r *FunctionReconciler) handleDeployedState(ctx context.Context, function *firebasev1alpha1.Function) (ctrl.Result, error) {
+	// Check if spec has changed by comparing Generation numbers
+	if function.Generation != function.Status.ObservedGeneration {
+		log.FromContext(ctx).Info("Function spec changed, triggering new deployment",
+			"currentGeneration", function.Generation,
+			"observedGeneration", function.Status.ObservedGeneration)
+
+		// Clear any existing Active references
+		function.Status.Active = nil
+		if err := r.Status().Update(ctx, function); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		// Update status to Pending to trigger new deployment
+		if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusPending,
+			"Redeploying due to spec change"); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		r.EventRecorder.Event(function, corev1.EventTypeNormal, "SpecChanged",
+			"Detected change in function spec, triggering new deployment")
+		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
+	return ctrl.Result{RequeueAfter: time.Minute}, nil
 }
 
 func (r *FunctionReconciler) updateStatus(ctx context.Context, function *firebasev1alpha1.Function, status string, message string) error {

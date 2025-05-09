@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: firebase-controller
-  newTag: "033"
+  newTag: "036"

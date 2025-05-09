@@ -11,7 +11,7 @@ spec:
   maxRetries: 3  # Add this line
   source:
     container:
-      image: timam/firebase-test:006
+      image: timam/firebase-test:004
       imagePullPolicy: Always
   project:
     auth:
