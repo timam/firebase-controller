@@ -120,13 +120,27 @@ func (r *FunctionReconciler) handleDeployingState(ctx context.Context, function 
 
 		// Check if job failed
 		if job.Status.Failed > 0 {
+			// First delete the failed job and its pod
+			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+
+			// Get logs before pod is deleted
 			errorMessage := "Deployment job failed"
 			if logs, err := r.getJobLogs(ctx, job); err == nil && logs != "" {
 				errorMessage = fmt.Sprintf("Deployment failed: %s", logs)
 			}
+
+			// Clear Active references
+			function.Status.Active = removeJobRef(function.Status.Active, ref)
+			if err := r.Status().Update(ctx, function); err != nil {
+				return ctrl.Result{}, err
+			}
+
 			if err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed, errorMessage); err != nil {
 				return ctrl.Result{}, err
 			}
+
 			r.EventRecorder.Event(function, corev1.EventTypeWarning, "DeploymentFailed", errorMessage)
 			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 		}
@@ -206,14 +220,33 @@ func (r *FunctionReconciler) handlePendingState(ctx context.Context, function *f
 }
 
 func (r *FunctionReconciler) handleFailedState(ctx context.Context, function *firebasev1alpha1.Function) (ctrl.Result, error) {
-	maxRetries := int32(3) // default value
+	maxRetries := int32(3)
 	if function.Spec.MaxRetries != nil {
 		maxRetries = *function.Spec.MaxRetries
 	}
 
 	if function.Status.RetryCount >= maxRetries {
-		err := r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed,
+		return ctrl.Result{}, r.updateStatus(ctx, function, firebasev1alpha1.FunctionStatusFailed,
 			fmt.Sprintf("Deployment failed permanently after %d retries", maxRetries))
+	}
+
+	// Clean up any existing jobs before retry
+	jobList := &batchv1.JobList{}
+	if err := r.List(ctx, jobList,
+		client.InNamespace(function.Namespace),
+		client.MatchingLabels{"firebase.timam.dev/function": function.Name}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	for i := range jobList.Items {
+		if err := r.Delete(ctx, &jobList.Items[i], client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Clear Active references
+	function.Status.Active = nil
+	if err := r.Status().Update(ctx, function); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -226,7 +259,7 @@ func (r *FunctionReconciler) handleFailedState(ctx context.Context, function *fi
 	r.EventRecorder.Event(function, corev1.EventTypeNormal, "Retrying",
 		fmt.Sprintf("Retrying deployment (attempt %d/%d)", function.Status.RetryCount, maxRetries))
 
-	return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+	return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 }
 
 func (r *FunctionReconciler) updateStatus(ctx context.Context, function *firebasev1alpha1.Function, status string, message string) error {

@@ -168,9 +168,7 @@ type DeploymentHistory struct {
 // +kubebuilder:printcolumn:name="NAMESPACE",type="string",JSONPath=".metadata.namespace"
 // +kubebuilder:printcolumn:name="STATUS",type="string",JSONPath=".status.status"
 // +kubebuilder:printcolumn:name="REVISION",type="string",JSONPath=".status.currentRevision"
-// +kubebuilder:printcolumn:name="SUCCESSFUL",type="integer",JSONPath=".status.successfulDeploymentsHistoryLimit"
-// +kubebuilder:printcolumn:name="FAILED",type="integer",JSONPath=".status.failedDeploymentsHistoryLimit"
-// +kubebuilder:printcolumn:name="LAST-DEPLOY",type="date",JSONPath=".status.lastSuccessfulDeployment"
+// +kubebuilder:printcolumn:name="LAST-DEPLOYED",type="date",JSONPath=".status.lastSuccessfulDeployment"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Function is the Schema for the functions API

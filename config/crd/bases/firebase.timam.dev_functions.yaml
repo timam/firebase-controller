@@ -24,14 +24,8 @@ spec:
     - jsonPath: .status.currentRevision
       name: REVISION
       type: string
-    - jsonPath: .status.successfulDeploymentsHistoryLimit
-      name: SUCCESSFUL
-      type: integer
-    - jsonPath: .status.failedDeploymentsHistoryLimit
-      name: FAILED
-      type: integer
     - jsonPath: .status.lastSuccessfulDeployment
-      name: LAST-DEPLOY
+      name: LAST-DEPLOYED
       type: date
     - jsonPath: .metadata.creationTimestamp
       name: AGE
